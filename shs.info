@@ -2,4 +2,5 @@ name = Simple hierarchical select
 backdrop = 1.x
 type = module
 description = Creates a simple hierarchical select widget for taxonomy fields.
+
 dependencies[] = taxonomy
