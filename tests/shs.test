@@ -1,0 +1,153 @@
+<?php
+/**
+ * @file
+ * Tests for the Simple hierarchical select module.
+ */
+
+/**
+ *
+ */
+class ShsTestCase extends BackdropWebTestCase {
+
+  /**
+   * The vocabulary used for testing.
+   *
+   * @var object
+   */
+  protected $vocabulary;
+
+  /**
+   * The administrative user.
+   *
+   * @var object
+   */
+  protected $admin_user;
+
+  /**
+   * {@inheritdoc}
+   */
+  public function setUp() {
+    parent::setUp('shs', 'taxonomy', 'field');
+
+    // Create a vocabulary.
+    $this->vocabulary = new TaxonomyVocabulary(array(
+      'name' => 'SHS Test Vocabulary',
+      'machine_name' => 'shs_test_vocabulary',
+    ));
+    taxonomy_vocabulary_save($this->vocabulary);
+
+    // Create an administrative user.
+    $this->admin_user = $this->backdropCreateUser(array(
+      'administer taxonomy',
+      'access content',
+    ));
+    $this->backdropLogin($this->admin_user);
+  }
+
+  /**
+   * Tests recursion in shs_term_get_children() and JSON data sanitization.
+   */
+  public function testTermJsonSanitization() {
+    // Create a term with an XSS payload in the name.
+    $xss_payload = '<script>alert("XSS")</script>';
+    $term = entity_create('taxonomy_term', array(
+      'vocabulary' => $this->vocabulary->machine_name,
+      'name' => $xss_payload,
+    ));
+    taxonomy_term_save($term);
+
+    // Retrieve children of the root (0) for this vocabulary.
+    // This calls shs_term_get_children() which was patched to use check_plain().
+    $children = shs_term_get_children($this->vocabulary->machine_name, 0);
+
+    // Assert that the raw payload is NOT present in the returned array.
+    $this->assertFalse(in_array($xss_payload, $children), 'Raw XSS payload is not present in JSON data.');
+
+    // Assert that the sanitized payload IS present.
+    $sanitized_payload = check_plain($xss_payload);
+    $this->assertTrue(in_array($sanitized_payload, $children), 'Sanitized payload is present in JSON data.');
+  }
+
+  /**
+   * Tests XSS sanitization in the field formatter.
+   */
+  public function testFormatterSanitization() {
+    // Create a Content Type.
+    $type = $this->backdropCreateContentType(array(
+      'name' => 'SHS Test Node',
+      'type' => 'shs_test_node',
+    ));
+
+    // Create a Term Reference field.
+    $field_name = 'field_shs_term_ref';
+    $field = array(
+      'field_name' => $field_name,
+      'type' => 'taxonomy_term_reference',
+      'settings' => array(
+        'allowed_values' => array(
+          array(
+            'vocabulary' => $this->vocabulary->machine_name,
+            'parent' => 0,
+          ),
+        ),
+      ),
+    );
+    field_create_field($field);
+
+    // Create an instance of the field on the content type, using SHS widget.
+    $instance = array(
+      'field_name' => $field_name,
+      'entity_type' => 'node',
+      'bundle' => 'shs_test_node',
+      'widget' => array(
+        'type' => 'taxonomy_shs',
+      ),
+      'display' => array(
+        'default' => array(
+          'type' => 'shs_default',
+          'settings' => array(
+            'linked' => FALSE, // Start validation with Unlinked (plain text)
+          ),
+        ),
+      ),
+    );
+    field_create_instance($instance);
+
+    // Create a term with XSS payload.
+    $xss_payload = '<script>alert("XSS Formatter")</script>';
+    $term = entity_create('taxonomy_term', array(
+      'vocabulary' => $this->vocabulary->machine_name,
+      'name' => $xss_payload,
+    ));
+    taxonomy_term_save($term);
+
+    // Create a node referencing this term.
+    $node = entity_create('node', array(
+      'type' => 'shs_test_node',
+      'title' => 'SHS Test Node Title',
+    ));
+    node_object_prepare($node);
+    $node->{$field_name}[LANGUAGE_NONE][0]['tid'] = $term->tid;
+    node_save($node);
+
+    // 1. Test Unlinked Display (Plain Text)
+    // The vulnerability was that unlinked terms were output raw.
+    $this->backdropGet('node/' . $node->nid);
+    $this->assertRaw(check_plain($xss_payload), 'Unlinked formatter output is sanitized.');
+    $this->assertNoRaw($xss_payload, 'Unlinked formatter output does NOT contain raw XSS.');
+
+    // 2. Test Linked Display (Link to Term Page)
+    // Update the instance to use linked display.
+    $instance['display']['default']['settings']['linked'] = TRUE;
+    field_update_instance($instance);
+
+    $this->backdropGet('node/' . $node->nid);
+    // The module now properly uses check_plain() on the term name before passing to l(),
+    // which will escape the text once.
+    $this->assertRaw(check_plain($xss_payload), 'Linked formatter output is sanitized.');
+
+    // We definitely do not want the raw payload.
+    $this->assertNoRaw($xss_payload, 'Linked formatter output does NOT contain raw XSS.');
+  }
+
+}

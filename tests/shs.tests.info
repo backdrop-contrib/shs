@@ -1,0 +1,5 @@
+[ShsTestCase]
+name = Test SHS module
+description = Tests XSS sanitization in SHS module.
+group = Simple hierarchical select
+file = shs.test
